@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include <QApplication>
 
+#include <thread>
 
 int SourceWidth=960;
 int SourceHeight=720;
@@ -105,15 +106,11 @@ static void displayState(nvxio::Render *renderer,
     renderer->putTextViewport(txt.str(), style);
 }
 
-
-int main(int argc, char* argv[])
+int VxThread(EventData eventData)
 {
-    QApplication a(argc, argv);
-    MainWindow w;
-    w.show();
-   
+    int argc;
+    char* argv[10];
     nvxio::Application &app = nvxio::Application::get();
-
     nvxio::ContextGuard context;
     vxRegisterLogCallback(context, &myLogCallback, vx_false_e);
 
@@ -153,10 +150,6 @@ int main(int argc, char* argv[])
         return nvxio::Application::APP_EXIT_CODE_INVALID_FORMAT;
     }
 
-    int frameCounter=0;
-    cv::Mat edges=cv::Mat(sourceParams.frameHeight,sourceParams.frameWidth,CV_8U);
-    cv::Mat col=cv::Mat(sourceParams.frameHeight,sourceParams.frameWidth,CV_8UC3);
-
     //Creating openVx images
     vx_image imageInput = vxCreateImage(context, sourceParams.frameWidth, sourceParams.frameHeight, VX_DF_IMAGE_RGBX);
     NVXIO_CHECK_REFERENCE(imageInput);
@@ -165,13 +158,13 @@ int main(int argc, char* argv[])
     vx_image imageOutput = vxCreateImage(context,sourceParams.frameWidth, sourceParams.frameHeight, VX_DF_IMAGE_U8);
     NVXIO_CHECK_REFERENCE(imageOutput);
 
-    nvx::Timer timerFetchFrame, timerDisplayFrame, timerProcess,timerTotal;
+    nvx::Timer timerFetchFrame, timerProcess, timerTotal;
 
     vx_graph graph;
     GenerateGraph(context, graph, imageInput, imageOutput);
 
     std::unique_ptr<nvxio::Render> renderer(nvxio::createDefaultRender(
-        context, "Feature Tracker Demo", sourceParams.frameWidth, sourceParams.frameHeight));
+        context, "", sourceParams.frameWidth, sourceParams.frameHeight));
 
     if (!renderer)
     {
@@ -179,11 +172,12 @@ int main(int argc, char* argv[])
         return nvxio::Application::APP_EXIT_CODE_NO_RENDER;
     }
 
-    EventData eventData;
     renderer->setOnKeyboardEventCallback(eventCallback, &eventData);
     timerTotal.tic();
 
     double fetchTime,processTime,totalTime;
+    nvxio::FrameSource::FrameStatus frameStatus;
+
     while(!eventData.shouldStop)
     {
         if(!eventData.pause)
@@ -192,9 +186,19 @@ int main(int argc, char* argv[])
             {
                 timerFetchFrame.tic();
                 //Fetching new frame
-                source->fetch(imageInput);
+                frameStatus = source->fetch(imageInput);
                 fetchTime=timerFetchFrame.toc();
 
+                if (frameStatus == nvxio::FrameSource::TIMEOUT) {
+                    continue;
+                }
+                if (frameStatus == nvxio::FrameSource::CLOSED) {
+                    if (!source->open()) {
+                        std::cerr << "Error: Failed to reopen the source" << std::endl;
+                        break;
+                    }
+                    continue;
+                }
                 timerProcess.tic();
                 //processing graph
                 vxProcessGraph(graph);
@@ -211,13 +215,35 @@ int main(int argc, char* argv[])
 
                 //Flushing data on renderer
                 renderer->flush();
+
             }
             catch(std::exception ex)
             {
                 std::cout << ex.what();
-                break;
+                return nvxio::Application::APP_EXIT_CODE_ERROR;
             }
         }
      }
+  //  vxReleaseImage(imageInput);
+  //  vxReleaseImage(imageOutput);
+  //  vxReleaseGraph(graph);
+  //  vxReleaseContext(context);
+    qApp->quit();
+    return nvxio::Application::APP_EXIT_CODE_SUCCESS;
+}
+
+
+
+
+int main(int argc, char* argv[])
+{
+    QApplication a(argc, argv);
+    MainWindow w;
+    w.show();    
+    EventData eventData;
+    std::thread VisionWorksThread(VxThread, eventData);
+    a.exec();
+    VisionWorksThread.join();
     return 0;
 }
+
